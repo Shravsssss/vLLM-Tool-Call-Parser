@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+src/parser_benchmark/__init__.py
+src/parser_benchmark.egg-info/PKG-INFO
+src/parser_benchmark.egg-info/SOURCES.txt
+src/parser_benchmark.egg-info/dependency_links.txt
+src/parser_benchmark.egg-info/requires.txt
+src/parser_benchmark.egg-info/top_level.txt
+src/parser_benchmark/models/__init__.py
+src/parser_benchmark/parsers/__init__.py

@@ -1,5 +1,11 @@
-"""Data models for tool calls and parse results."""
+"""Data models for tool calls and parse results.
 
-from .tool_call import ToolCall, ParseResult
+This module provides Pydantic-validated models for:
+- ToolCall: Represents extracted tool/function calls
+- ParseResult: Complete parsing operation result
+- ToolDefinition: Tool/function schema definition
+"""
 
-__all__ = ["ToolCall", "ParseResult"]
+from .tool_call import ToolCall, ParseResult, ToolDefinition
+
+__all__ = ["ToolCall", "ParseResult", "ToolDefinition"]

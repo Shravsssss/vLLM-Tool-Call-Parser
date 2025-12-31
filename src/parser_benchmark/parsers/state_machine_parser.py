@@ -17,6 +17,7 @@ class ParserState(Enum):
     IN_JSON_OBJECT = auto()  # Inside a JSON object
     IN_JSON_ARRAY = auto()   # Inside a JSON array
     IN_XML_TAG = auto()      # Inside XML-style tags
+    IN_XML_ATTR_TAG = auto() # Inside XML attribute-style tag (Qwen format)
     ERROR = auto()           # Error state
     COMPLETE = auto()        # Successfully parsed
 
@@ -112,6 +113,8 @@ class StateMachineParser(BaseParser):
                 self._state_in_json_array(text, ctx)
             elif ctx.state == ParserState.IN_XML_TAG:
                 self._state_in_xml_tag(text, ctx)
+            elif ctx.state == ParserState.IN_XML_ATTR_TAG:
+                self._state_in_xml_attr_tag(text, ctx)
             elif ctx.state == ParserState.ERROR:
                 self._state_error(text, ctx)
             elif ctx.state == ParserState.COMPLETE:
@@ -123,10 +126,18 @@ class StateMachineParser(BaseParser):
         """Look for the start of a tool call."""
         pos = ctx.position
 
-        # Check for XML-style marker
+        # Check for XML-style wrapper marker first
         if text[pos:pos + len(self.XML_START)] == self.XML_START:
             ctx.state = ParserState.IN_XML_TAG
             ctx.position = pos + len(self.XML_START)
+            ctx.buffer = ""
+            return
+
+        # Check for XML attribute format (Qwen-style)
+        # e.g., <get_weather city="Tokyo" unit="fahrenheit"/>
+        if text[pos] == '<' and self._is_xml_attr_start(text, pos):
+            ctx.state = ParserState.IN_XML_ATTR_TAG
+            ctx.position = pos + 1  # Skip <
             ctx.buffer = ""
             return
 
@@ -332,3 +343,174 @@ class StateMachineParser(BaseParser):
             name=data['name'],
             arguments=arguments if isinstance(arguments, dict) else {}
         )
+
+    def _is_xml_attr_start(self, text: str, pos: int) -> bool:
+        """Check if position starts an XML attribute-style tag.
+
+        Args:
+            text: Full text being parsed.
+            pos: Position to check (should be '<').
+
+        Returns:
+            True if this looks like an XML attribute tag start.
+        """
+        if pos >= len(text) or text[pos] != '<':
+            return False
+
+        # Skip <
+        i = pos + 1
+
+        # Must start with letter or underscore
+        if i >= len(text) or not (text[i].isalpha() or text[i] == '_'):
+            return False
+
+        # Continue with alphanumeric or underscore
+        while i < len(text) and (text[i].isalnum() or text[i] == '_'):
+            i += 1
+
+        # Get tag name
+        tag = text[pos+1:i]
+
+        # Exclude known wrapper tags
+        if tag in ('tool_call', 'function', 'functions'):
+            return False
+
+        # Must have whitespace before attributes, or = sign nearby (indicating attributes)
+        if i < len(text):
+            # Check if there's an attribute pattern ahead (allow spaces around =)
+            remaining = text[i:i+50]  # Look ahead
+            # Look for = followed eventually by " (with possible spaces)
+            if '=' in remaining and '"' in remaining and ('>' in remaining or '/>' in remaining):
+                return True
+
+        return False
+
+    def _state_in_xml_attr_tag(self, text: str, ctx: ParserContext):
+        """Parse XML attribute-style tool call.
+
+        Handles patterns like:
+        - <func_name attr1="val1" attr2="val2"/>
+        - <func_name attr1="val1">
+        """
+        pos = ctx.position
+
+        # Extract tag name
+        tag_start = pos
+        while pos < len(text) and (text[pos].isalnum() or text[pos] == '_'):
+            pos += 1
+
+        if pos == tag_start:
+            ctx.state = ParserState.ERROR
+            return
+
+        tag_name = text[tag_start:pos]
+
+        # Skip known wrapper tags
+        if tag_name in ('tool_call', 'function', 'functions'):
+            ctx.state = ParserState.SCANNING
+            return
+
+        arguments: dict[str, Any] = {}
+
+        # Parse attributes until we hit > or />
+        while pos < len(text):
+            # Skip whitespace
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+
+            if pos >= len(text):
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+
+            # Check for end of tag
+            if text[pos] == '/':
+                if pos + 1 < len(text) and text[pos + 1] == '>':
+                    pos += 2
+                    break
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+
+            if text[pos] == '>':
+                pos += 1
+                break
+
+            # Parse attribute name
+            attr_start = pos
+            while pos < len(text) and (text[pos].isalnum() or text[pos] == '_'):
+                pos += 1
+
+            if pos == attr_start:
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+
+            attr_name = text[attr_start:pos]
+
+            # Expect =
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+
+            if pos >= len(text) or text[pos] != '=':
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+            pos += 1
+
+            # Expect "
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+
+            if pos >= len(text) or text[pos] != '"':
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+            pos += 1
+
+            # Extract value
+            value_start = pos
+            while pos < len(text) and text[pos] != '"':
+                pos += 1
+
+            if pos >= len(text):
+                ctx.state = ParserState.ERROR
+                ctx.position = pos
+                return
+
+            attr_value = text[value_start:pos]
+            pos += 1  # Skip closing "
+
+            arguments[attr_name] = self._convert_attr_value(attr_value)
+
+        # Emit tool call if we have arguments
+        if arguments:
+            ctx.tool_calls.append(ToolCall(name=tag_name, arguments=arguments))
+
+        ctx.position = pos
+        ctx.state = ParserState.COMPLETE
+
+    def _convert_attr_value(self, value: str) -> Any:
+        """Convert string attribute value to appropriate Python type.
+
+        Args:
+            value: String value from XML attribute.
+
+        Returns:
+            Converted value (bool, None, int, float, or str).
+        """
+        if value.lower() == 'true':
+            return True
+        if value.lower() == 'false':
+            return False
+        if value.lower() in ('null', 'none'):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        return value

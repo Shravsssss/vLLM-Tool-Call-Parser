@@ -28,6 +28,19 @@ class RegexParser(BaseParser):
         re.DOTALL
     )
 
+    # XML attribute format pattern (Qwen-style)
+    # Matches: <func_name attr1="val1" attr2="val2"/> or <func_name attr1="val1">
+    XML_ATTR_PATTERN = re.compile(
+        r'<([a-zA-Z_][a-zA-Z0-9_]*)'  # Tag name (group 1)
+        r'((?:\s+[a-zA-Z_][a-zA-Z0-9_]*\s*=\s*"[^"]*")+)'  # Attributes (group 2) - with optional spaces around =
+        r'\s*/?>'  # Self-closing or open tag
+    )
+
+    # Individual attribute extraction pattern (with optional spaces around =)
+    ATTR_PATTERN = re.compile(
+        r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"([^"]*)"'
+    )
+
     JSON_OBJECT_PATTERN = re.compile(
         r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}',
         re.DOTALL
@@ -91,18 +104,32 @@ class RegexParser(BaseParser):
         return [self.parse(text) for text in texts]
 
     def _extract_tool_calls(self, text: str) -> list[ToolCall]:
-        """Extract tool calls using multiple strategies."""
+        """Extract tool calls using multiple strategies.
+
+        Searches for all formats and combines results.
+        """
         tool_calls: list[ToolCall] = []
+        parsed_whole_text = False  # Track if we parsed the entire text as JSON
 
+        # Check for XML attribute format (Qwen-style)
+        # e.g., <get_weather city="Tokyo" unit="fahrenheit"/>
+        xml_attr_matches = self.XML_ATTR_PATTERN.findall(text)
+        for tag_name, attrs_str in xml_attr_matches:
+            # Skip if it's a known wrapper tag
+            if tag_name in ('tool_call', 'function', 'functions'):
+                continue
+            arguments = self._parse_xml_attributes(attrs_str)
+            if arguments:  # Only add if we found attributes
+                tool_calls.append(ToolCall(name=tag_name, arguments=arguments))
+
+        # Check for XML wrapper format (Hermes-style)
         xml_matches = self.XML_PATTERN.findall(text)
-        if xml_matches:
-            for match in xml_matches:
-                calls = self._parse_json_content(match)
-                tool_calls.extend(calls)
-            return tool_calls
+        for match in xml_matches:
+            calls = self._parse_json_content(match)
+            tool_calls.extend(calls)
 
+        # Try to parse as pure JSON array at start
         stripped = text.strip()
-
         if stripped.startswith('['):
             parsed = self._try_parse_with_fixes(stripped)
             if parsed is not None and isinstance(parsed, list):
@@ -110,39 +137,45 @@ class RegexParser(BaseParser):
                     if self._is_tool_call(item):
                         tool_calls.append(self._dict_to_tool_call(item))
                 if tool_calls:
-                    return tool_calls
+                    parsed_whole_text = True
 
-        if stripped.startswith('{'):
+        # Try to parse as pure JSON object at start
+        elif stripped.startswith('{'):
             parsed = self._try_parse_with_fixes(stripped)
             if parsed is not None and self._is_tool_call(parsed):
-                return [self._dict_to_tool_call(parsed)]
+                tool_calls.append(self._dict_to_tool_call(parsed))
+                parsed_whole_text = True
 
-        single_quote_matches = self.SINGLE_QUOTE_PATTERN.findall(text)
-        for name, args_str in single_quote_matches:
-            fixed_args = self._convert_single_to_double_quotes(args_str)
-            try:
-                arguments = json.loads(fixed_args)
-                tool_calls.append(ToolCall(name=name, arguments=arguments))
-            except json.JSONDecodeError:
-                continue
-
-        if tool_calls:
-            return tool_calls
-
-        matches = self.FLEXIBLE_JSON_PATTERN.findall(text)
-        for name, args_str in matches:
-            arguments = None
-            try:
-                arguments = json.loads(args_str)
-            except json.JSONDecodeError:
-                fixed_args = self._fix_malformed_json(args_str)
+        # Try single quote matching if no calls found yet
+        if not tool_calls:
+            single_quote_matches = self.SINGLE_QUOTE_PATTERN.findall(text)
+            for name, args_str in single_quote_matches:
+                fixed_args = self._convert_single_to_double_quotes(args_str)
                 try:
                     arguments = json.loads(fixed_args)
+                    tool_calls.append(ToolCall(name=name, arguments=arguments))
                 except json.JSONDecodeError:
                     continue
 
-            if arguments is not None:
-                tool_calls.append(ToolCall(name=name, arguments=arguments))
+        # Try flexible JSON pattern for embedded JSON in text
+        # Skip if we successfully parsed the whole text as JSON (would duplicate)
+        if not parsed_whole_text:
+            # Remove XML wrapper regions to avoid duplicating calls found there
+            text_for_flexible = self.XML_PATTERN.sub('', text) if xml_matches else text
+            matches = self.FLEXIBLE_JSON_PATTERN.findall(text_for_flexible)
+            for name, args_str in matches:
+                arguments = None
+                try:
+                    arguments = json.loads(args_str)
+                except json.JSONDecodeError:
+                    fixed_args = self._fix_malformed_json(args_str)
+                    try:
+                        arguments = json.loads(fixed_args)
+                    except json.JSONDecodeError:
+                        continue
+
+                if arguments is not None:
+                    tool_calls.append(ToolCall(name=name, arguments=arguments))
 
         return tool_calls
 
@@ -246,3 +279,48 @@ class RegexParser(BaseParser):
             pass
 
         return None
+
+    def _parse_xml_attributes(self, attrs_str: str) -> dict[str, Any]:
+        """Parse XML attributes string into arguments dict.
+
+        Args:
+            attrs_str: String containing XML attributes like ' city="Tokyo" unit="F"'
+
+        Returns:
+            Dictionary mapping attribute names to their values.
+        """
+        arguments: dict[str, Any] = {}
+        for match in self.ATTR_PATTERN.finditer(attrs_str):
+            attr_name, attr_value = match.groups()
+            arguments[attr_name] = self._convert_attr_value(attr_value)
+        return arguments
+
+    def _convert_attr_value(self, value: str) -> Any:
+        """Convert string attribute value to appropriate Python type.
+
+        Args:
+            value: String value from XML attribute.
+
+        Returns:
+            Converted value (bool, None, int, float, or str).
+        """
+        # Try boolean
+        if value.lower() == 'true':
+            return True
+        if value.lower() == 'false':
+            return False
+        # Try null/none
+        if value.lower() in ('null', 'none'):
+            return None
+        # Try integer
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        # Try float
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        # Return as string
+        return value

@@ -99,13 +99,22 @@ class IncrementalParser(BaseParser):
                     i = end_pos
                 else:
                     i += 1
-            # Check for XML-style markers
+            # Check for XML-style markers (wrapper format)
             elif text[i:i+11] == '<tool_call>':
                 content, end_pos = self._extract_xml_content(text, i)
                 if content:
                     tool_call = self._try_parse_tool_call(content)
                     if tool_call:
                         tool_calls.append(tool_call)
+                    i = end_pos
+                else:
+                    i += 1
+            # Check for XML attribute format (Qwen-style)
+            # e.g., <get_weather city="Tokyo" unit="fahrenheit"/>
+            elif text[i] == '<' and i + 1 < len(text) and (text[i+1].isalpha() or text[i+1] == '_'):
+                tool_call, end_pos = self._extract_xml_attr_call(text, i)
+                if tool_call:
+                    tool_calls.append(tool_call)
                     i = end_pos
                 else:
                     i += 1
@@ -247,6 +256,158 @@ class IncrementalParser(BaseParser):
         except json.JSONDecodeError:
             pass
         return tool_calls
+
+    def _extract_xml_attr_call(self, text: str, start: int) -> tuple[ToolCall | None, int]:
+        """Extract XML attribute-style tool call starting at position.
+
+        Matches patterns like:
+        - <func_name attr1="val1" attr2="val2"/>
+        - <func_name attr1="val1">
+
+        Args:
+            text: Full text being parsed.
+            start: Starting position (should be '<').
+
+        Returns:
+            Tuple of (ToolCall or None, end position).
+        """
+        if start >= len(text) or text[start] != '<':
+            return None, start + 1
+
+        i = start + 1
+
+        # Extract tag name (must be valid identifier)
+        tag_start = i
+        while i < len(text) and (text[i].isalnum() or text[i] == '_'):
+            i += 1
+
+        if i == tag_start:  # No valid tag name
+            return None, start + 1
+
+        tag_name = text[tag_start:i]
+
+        # Must start with letter or underscore
+        if not (tag_name[0].isalpha() or tag_name[0] == '_'):
+            return None, start + 1
+
+        # Skip known wrapper tags
+        if tag_name in ('tool_call', 'function', 'functions'):
+            return None, start + 1
+
+        # Parse attributes until we hit > or />
+        arguments: dict[str, Any] = {}
+        while i < len(text):
+            # Skip whitespace
+            while i < len(text) and text[i].isspace():
+                i += 1
+
+            if i >= len(text):
+                return None, start + 1
+
+            # Check for self-closing or opening tag end
+            if text[i] == '/':
+                if i + 1 < len(text) and text[i + 1] == '>':
+                    # Self-closing tag - we found a complete tag
+                    if arguments:  # Only return if we have attributes
+                        return ToolCall(name=tag_name, arguments=arguments), i + 2
+                    return None, start + 1
+                return None, start + 1
+
+            if text[i] == '>':
+                # Open tag end
+                if arguments:
+                    return ToolCall(name=tag_name, arguments=arguments), i + 1
+                return None, start + 1
+
+            # Try to parse attribute
+            attr_name, attr_value, new_pos = self._parse_single_attribute(text, i)
+            if attr_name is not None:
+                arguments[attr_name] = attr_value
+                i = new_pos
+            else:
+                # Not a valid attribute, bail out
+                return None, start + 1
+
+        return None, start + 1
+
+    def _parse_single_attribute(self, text: str, start: int) -> tuple[str | None, Any, int]:
+        """Parse a single XML attribute at position.
+
+        Args:
+            text: Full text being parsed.
+            start: Starting position.
+
+        Returns:
+            Tuple of (attr_name, attr_value, end_position) or (None, None, start) if invalid.
+        """
+        i = start
+
+        # Extract attribute name
+        name_start = i
+        while i < len(text) and (text[i].isalnum() or text[i] == '_'):
+            i += 1
+
+        if i == name_start:
+            return None, None, start
+
+        attr_name = text[name_start:i]
+
+        # Skip whitespace and expect =
+        while i < len(text) and text[i].isspace():
+            i += 1
+
+        if i >= len(text) or text[i] != '=':
+            return None, None, start
+        i += 1
+
+        # Skip whitespace and expect "
+        while i < len(text) and text[i].isspace():
+            i += 1
+
+        if i >= len(text) or text[i] != '"':
+            return None, None, start
+        i += 1
+
+        # Extract value until closing "
+        value_start = i
+        while i < len(text) and text[i] != '"':
+            i += 1
+
+        if i >= len(text):
+            return None, None, start
+
+        attr_value = text[value_start:i]
+        i += 1  # Skip closing "
+
+        # Convert value to appropriate type
+        converted_value = self._convert_attr_value(attr_value)
+
+        return attr_name, converted_value, i
+
+    def _convert_attr_value(self, value: str) -> Any:
+        """Convert string attribute value to appropriate Python type.
+
+        Args:
+            value: String value from XML attribute.
+
+        Returns:
+            Converted value (bool, None, int, float, or str).
+        """
+        if value.lower() == 'true':
+            return True
+        if value.lower() == 'false':
+            return False
+        if value.lower() in ('null', 'none'):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        return value
 
 
 class StreamingParser:

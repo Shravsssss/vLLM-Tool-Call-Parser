@@ -474,3 +474,325 @@ class TestRegressions:
         text = '{"name": "test", "arguments": {"value": 1.23e10}}'
         result = parser.parse(text)
         assert result.success
+
+
+# =============================================================================
+# Category 8: XML Attribute Format (Qwen-style) (12 cases)
+# =============================================================================
+
+class TestXMLAttributeFormat:
+    """Tests for XML attribute-style tool calls (Qwen format)."""
+
+    def test_self_closing_single_attr(self, parser):
+        """Test self-closing tag with single attribute."""
+        text = '<search query="Python tutorials"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.num_calls == 1
+        assert result.tool_calls[0].name == "search"
+        assert result.tool_calls[0].arguments["query"] == "Python tutorials"
+
+    def test_self_closing_multiple_attrs(self, parser):
+        """Test self-closing tag with multiple attributes."""
+        text = '<get_weather city="Tokyo" unit="fahrenheit"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].name == "get_weather"
+        assert result.tool_calls[0].arguments["city"] == "Tokyo"
+        assert result.tool_calls[0].arguments["unit"] == "fahrenheit"
+
+    def test_open_tag_format(self, parser):
+        """Test open tag format (no self-closing)."""
+        text = '<calculate expression="15 * 8 + 20">'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].name == "calculate"
+        assert result.tool_calls[0].arguments["expression"] == "15 * 8 + 20"
+
+    def test_numeric_attribute_value(self, parser):
+        """Test that numeric values are converted."""
+        text = '<set_value count="42" ratio="3.14"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].arguments["count"] == 42
+        assert result.tool_calls[0].arguments["ratio"] == 3.14
+
+    def test_boolean_attribute_value(self, parser):
+        """Test that boolean values are converted."""
+        text = '<toggle enabled="true" visible="false"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].arguments["enabled"] is True
+        assert result.tool_calls[0].arguments["visible"] is False
+
+    def test_null_attribute_value(self, parser):
+        """Test null/none attribute values."""
+        text = '<clear value="null"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].arguments["value"] is None
+
+    def test_multiple_xml_attr_calls(self, parser):
+        """Test multiple XML attribute-style calls."""
+        text = '<search query="first"/> <search query="second"/>'
+        result = parser.parse(text)
+        assert result.num_calls == 2
+        assert result.tool_calls[0].arguments["query"] == "first"
+        assert result.tool_calls[1].arguments["query"] == "second"
+
+    def test_xml_attr_with_surrounding_text(self, parser):
+        """Test XML attribute call embedded in text."""
+        text = 'Let me search for that. <search query="Python"/> Here are the results.'
+        result = parser.parse(text)
+        assert result.num_calls == 1
+        assert result.tool_calls[0].name == "search"
+
+    def test_underscore_function_name(self, parser):
+        """Test function name with underscores."""
+        text = '<get_user_profile_v2 user_id="123"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].name == "get_user_profile_v2"
+
+    def test_spaces_around_equals(self, parser):
+        """Test attributes with spaces around equals sign."""
+        text = '<func attr = "value"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].arguments["attr"] == "value"
+
+    def test_xml_attr_mixed_with_json(self, parser):
+        """Test XML attribute format coexisting with JSON."""
+        text = '''<search query="test"/>
+        {"name": "verify", "arguments": {"result": true}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 2
+
+    def test_three_attributes(self, parser):
+        """Test three attributes in one tag."""
+        text = '<api_call endpoint="/users" method="GET" timeout="30"/>'
+        result = parser.parse(text)
+        assert result.success
+        assert result.tool_calls[0].arguments["endpoint"] == "/users"
+        assert result.tool_calls[0].arguments["method"] == "GET"
+        assert result.tool_calls[0].arguments["timeout"] == 30
+
+
+# =============================================================================
+# Category 9: Real LLM Output Patterns (8 cases)
+# =============================================================================
+
+class TestRealLLMOutputPatterns:
+    """Tests for realistic LLM output patterns."""
+
+    def test_markdown_code_block_json(self, parser):
+        """Test JSON tool call inside markdown code block."""
+        text = '''Here's the function call:
+```json
+{"name": "search", "arguments": {"query": "test"}}
+```
+Done!'''
+        result = parser.parse(text)
+        assert result.success
+        assert result.num_calls == 1
+
+    def test_markdown_code_block_plain(self, parser):
+        """Test tool call inside plain markdown code block."""
+        text = '''```
+{"name": "calculate", "arguments": {"expr": "2+2"}}
+```'''
+        result = parser.parse(text)
+        assert result.success
+
+    def test_thinking_before_tool_call(self, parser):
+        """Test thinking/reasoning text before tool call."""
+        text = '''I need to first search for information.
+Let me think... I should use the search function.
+Okay, here's my decision:
+{"name": "search", "arguments": {"query": "python tutorial"}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 1
+        assert result.tool_calls[0].name == "search"
+
+    def test_cot_with_multiple_calls(self, parser):
+        """Test chain-of-thought with multiple tool calls."""
+        text = '''First I'll get the weather:
+{"name": "get_weather", "arguments": {"city": "NYC"}}
+Then I'll search for restaurants:
+{"name": "search", "arguments": {"query": "restaurants in NYC"}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 2
+
+    def test_bullet_point_tool_calls(self, parser):
+        """Test tool calls in bullet point format."""
+        text = '''Here are the actions:
+- {"name": "step1", "arguments": {}}
+- {"name": "step2", "arguments": {}}
+- {"name": "step3", "arguments": {}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 3
+
+    def test_numbered_list_tool_calls(self, parser):
+        """Test tool calls in numbered list format."""
+        text = '''Executing:
+1. {"name": "first", "arguments": {}}
+2. {"name": "second", "arguments": {}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 2
+
+    def test_explanation_after_call(self, parser):
+        """Test explanation text after tool call."""
+        text = '''{"name": "analyze", "arguments": {"data": [1,2,3]}}
+This will analyze the provided data array and return statistics.'''
+        result = parser.parse(text)
+        assert result.num_calls == 1
+
+    def test_assistant_style_output(self, parser):
+        """Test assistant-style response with tool call."""
+        text = '''I'll help you search for that information.
+
+{"name": "web_search", "arguments": {"query": "Python best practices"}}
+
+Let me check the results...'''
+        result = parser.parse(text)
+        assert result.num_calls == 1
+
+
+# =============================================================================
+# Category 10: Error Recovery Robustness (10 cases)
+# =============================================================================
+
+class TestErrorRecoveryRobustness:
+    """Tests for parser error recovery capabilities."""
+
+    def test_recover_after_malformed(self, parser):
+        """Test recovery after malformed JSON."""
+        text = '''{"name": "bad", "arguments": {broken}}
+        {"name": "good", "arguments": {}}'''
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_recover_from_truncated(self, parser):
+        """Test recovery from truncated call followed by valid one."""
+        text = '''{"name": "truncat
+        {"name": "complete", "arguments": {}}'''
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_nested_broken_json(self, parser):
+        """Test handling of deeply nested broken JSON."""
+        text = '{"name": "test", "arguments": {"a": {"b": {"c": }'
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_unicode_escape_error_recovery(self, parser):
+        """Test recovery from invalid unicode escape."""
+        text = '{"name": "test", "arguments": {"text": "valid text"}}'
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_multiple_errors_recovery(self, parser):
+        """Test recovery from multiple consecutive errors."""
+        text = '''{broken} {also broken} {"name": "valid", "arguments": {}}'''
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_partial_xml_recovery(self, parser):
+        """Test recovery from partial XML tag."""
+        text = '''<tool_call>incomplete
+        <tool_call>{"name": "valid", "arguments": {}}</tool_call>'''
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_mismatched_brackets(self, parser):
+        """Test handling of mismatched brackets."""
+        text = '{"name": "test", "arguments": {}}'
+        result = parser.parse(text)
+        assert isinstance(result, ParseResult)
+
+    def test_extremely_long_broken_string(self, parser):
+        """Test handling of very long input without valid calls."""
+        long_text = 'x' * 5000
+        result = parser.parse(long_text)
+        assert isinstance(result, ParseResult)
+
+    def test_graceful_empty_handling(self, parser):
+        """Test graceful handling of empty input."""
+        result = parser.parse("")
+        assert isinstance(result, ParseResult)
+        assert result.num_calls == 0
+
+    def test_whitespace_only_input(self, parser):
+        """Test handling of whitespace-only input."""
+        result = parser.parse("   \n\t\n   ")
+        assert isinstance(result, ParseResult)
+        assert result.num_calls == 0
+
+
+# =============================================================================
+# Category 11: Multi-Format Mixed Tests (8 cases)
+# =============================================================================
+
+class TestMultiFormatMixed:
+    """Tests for handling multiple formats in same input."""
+
+    def test_json_then_xml_wrapper(self, parser):
+        """Test JSON followed by XML-wrapped call."""
+        text = '''{"name": "first", "arguments": {}}
+        <tool_call>{"name": "second", "arguments": {}}</tool_call>'''
+        result = parser.parse(text)
+        assert result.num_calls >= 1
+
+    def test_xml_attr_then_json(self, parser):
+        """Test XML attribute format followed by JSON."""
+        text = '''<search query="test"/>
+        {"name": "verify", "arguments": {}}'''
+        result = parser.parse(text)
+        assert result.num_calls == 2
+
+    def test_all_three_formats(self, parser):
+        """Test all three formats in one input."""
+        text = '''<quick_search q="test"/>
+        {"name": "process", "arguments": {}}
+        <tool_call>{"name": "finish", "arguments": {}}</tool_call>'''
+        result = parser.parse(text)
+        assert result.num_calls >= 2
+
+    def test_array_with_xml_wrapper(self, parser):
+        """Test JSON array alongside XML wrapper."""
+        text = '''[{"name": "a", "arguments": {}}, {"name": "b", "arguments": {}}]
+        <tool_call>{"name": "c", "arguments": {}}</tool_call>'''
+        result = parser.parse(text)
+        assert result.num_calls >= 2
+
+    def test_interleaved_formats_with_text(self, parser):
+        """Test interleaved formats with explanatory text."""
+        text = '''First, let me search:
+        <search query="topic"/>
+        Found results. Now processing:
+        {"name": "process", "arguments": {"data": "results"}}
+        Done!'''
+        result = parser.parse(text)
+        assert result.num_calls == 2
+
+    def test_format_priority_json_over_text(self, parser):
+        """Test that JSON in text is still extracted."""
+        text = 'The call is {"name": "test", "arguments": {}} as shown above.'
+        result = parser.parse(text)
+        assert result.num_calls == 1
+
+    def test_xml_wrapper_with_extra_whitespace(self, parser):
+        """Test XML wrapper with excessive whitespace."""
+        text = '''<tool_call>
+
+        {"name": "test", "arguments": {}}
+
+        </tool_call>'''
+        result = parser.parse(text)
+        assert result.success
+
+    def test_consecutive_different_formats(self, parser):
+        """Test rapidly switching between formats."""
+        text = '''<a x="1"/>{"name": "b", "arguments": {}}<tool_call>{"name": "c", "arguments": {}}</tool_call>'''
+        result = parser.parse(text)
+        assert result.num_calls >= 2

@@ -14,6 +14,7 @@ from typing import Any, Generator
 from openai import OpenAI
 
 from parser_benchmark.parsers import RegexParser, IncrementalParser, StateMachineParser
+from parser_benchmark.parsers.incremental_parser import StreamingParser
 from parser_benchmark.models import ToolCall, ParseResult
 
 
@@ -613,8 +614,7 @@ class VLLMComparisonRunner:
         messages = [{"role": "user", "content": prompt}]
 
         # Stream response and measure time-to-first-call for incremental parser
-        incremental = IncrementalParser()
-        incremental.reset()
+        streaming_parser = StreamingParser()
 
         first_call_time = None
         tokens = 0
@@ -635,8 +635,8 @@ class VLLMComparisonRunner:
                     content = chunk.choices[0].delta.content
                     tokens += 1
 
-                    # Feed to incremental parser
-                    new_calls = incremental.feed(content)
+                    # Feed to streaming parser
+                    new_calls = streaming_parser.feed(content)
 
                     if new_calls and first_call_time is None:
                         first_call_time = (time.perf_counter() - start) * 1000
